@@ -5,7 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>Без цензуры</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎧</text></svg>">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="apple-mobile-web-app-title" content="Без цензуры">
+<meta name="theme-color" content="#ff5500">
 <style>
 :root {
   --bg: #f4f4f6;
@@ -135,9 +139,24 @@ details li { margin-bottom: 6px; }
     <ul class="history" id="history"></ul>
   </section>
 
+  <section class="card hidden" id="shortcutCard">
+    <details>
+      <summary>Сохранять прямо в foobar2000 (быстрая команда)</summary>
+      <ol>
+        <li><a href="uncensored.shortcut" id="shortcutLink">Скачай команду «Без цензуры»</a> → «Добавить быструю команду».</li>
+        <li>При добавлении попросит токен — нажми кнопку ниже, он скопируется, вставь.
+          <div class="row"><button class="secondary" id="tokenBtn">Токен для команды</button></div>
+          <div class="caption" id="tokenNote"></div>
+        </li>
+        <li>Один раз: в приложении «Команды» открой «Без цензуры» → действие «Сохранить файл» → выключи «Спрашивать, куда сохранить» → выбери «На iPhone» → foobar2000.</li>
+        <li>Пользуйся: в Apple Music / Spotify / Яндексе «Поделиться» → «Без цензуры». Или скопируй ссылку и запусти команду — она возьмёт из буфера. Готовый трек сам ляжет в foobar, придёт уведомление.</li>
+      </ol>
+    </details>
+  </section>
+
   <section class="card">
     <details>
-      <summary>Чтобы качалось сразу в foobar2000</summary>
+      <summary>Через Safari (если без команды)</summary>
       <ol>
         <li>Настройки iPhone → Приложения → Safari → Загрузки.</li>
         <li>«Другое…» → «На iPhone» → папка <b>foobar2000</b> → «Готово».</li>
@@ -250,6 +269,7 @@ function showScreen(screen) {
   $("loginCard").classList.toggle("hidden", screen !== "login");
   $("setupCard").classList.toggle("hidden", screen !== "setup");
   $("formCard").classList.toggle("hidden", screen !== "app");
+  $("shortcutCard").classList.toggle("hidden", screen !== "app");
   if (screen !== "app") {
     $("jobCard").classList.add("hidden");
     $("historyCard").classList.add("hidden");
@@ -449,6 +469,22 @@ $("paste").addEventListener("click", async () => {
     if (text) { $("query").value = text.trim(); start(); }
   } catch {
     $("query").focus();
+  }
+});
+$("tokenBtn").addEventListener("click", async () => {
+  $("tokenBtn").disabled = true;
+  try {
+    const result = await call("/api/auth/device-token", { method: "POST" });
+    try {
+      await navigator.clipboard.writeText(result.token);
+      $("tokenNote").textContent = "скопировано, действует год. Вставь при добавлении команды.";
+    } catch {
+      $("tokenNote").textContent = `скопируй вручную: ${result.token}`;
+    }
+  } catch (error) {
+    $("tokenNote").textContent = String(error.message || error);
+  } finally {
+    $("tokenBtn").disabled = false;
   }
 });
 $("loginBtn").addEventListener("click", login);
