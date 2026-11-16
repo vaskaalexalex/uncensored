@@ -103,13 +103,19 @@ details li { margin-bottom: 6px; }
     <p class="sub">Ссылка на трек или «Исполнитель - Название» — найду версию без вырезанного мата и скачаю с тегами и обложкой.</p>
   </div>
 
-  <section class="card" id="keyCard">
-    <div class="muted" style="margin-bottom:8px">Ключ доступа (сохранится на этом устройстве)</div>
-    <input id="keyInput" type="password" autocomplete="off" placeholder="ключ">
-    <div class="row"><button class="primary" id="keySave">Сохранить</button></div>
+  <section class="card hidden" id="loginCard">
+    <div class="muted" style="margin-bottom:8px" id="loginNote">Вход только с твоего устройства</div>
+    <div class="row" style="margin-top:0"><button class="primary" id="loginBtn">Войти через Face ID</button></div>
   </section>
 
-  <section class="card" id="formCard">
+  <section class="card hidden" id="setupCard">
+    <div class="muted" style="margin-bottom:8px">Первая настройка: введи одноразовый ключ и привяжи Face ID. После этого ключ больше не нужен.</div>
+    <input id="setupKey" type="password" autocomplete="off" placeholder="одноразовый ключ">
+    <div class="row"><button class="primary" id="setupBtn">Привязать Face ID</button></div>
+    <div class="caption" id="setupNote"></div>
+  </section>
+
+  <section class="card hidden" id="formCard">
     <textarea id="query" placeholder="https://music.apple.com/…  ·  open.spotify.com/…  ·  music.yandex.ru/…  ·  Паша Техник - Давид Птаха"></textarea>
     <div class="row">
       <button class="secondary" id="paste">Вставить</button>
@@ -140,8 +146,8 @@ details li { margin-bottom: 6px; }
       </ol>
     </details>
     <details style="margin-top:12px">
-      <summary>Ключ / сменить ключ</summary>
-      <div class="row"><button class="secondary" id="keyReset">Ввести другой ключ</button></div>
+      <summary>Выйти</summary>
+      <div class="row"><button class="secondary" id="logoutBtn">Выйти на этом устройстве</button></div>
     </details>
   </section>
 </main>
@@ -156,30 +162,165 @@ const store = {
   },
 };
 const $ = (id) => document.getElementById(id);
-let key = store.get("key", "");
+let session = store.get("session", null);
 let polling = null;
+let loginOptions = null;
+let setupOptions = null;
+let setupOptionsKey = "";
 
 const params = new URLSearchParams(location.search);
-if (params.get("k")) {
-  key = params.get("k");
-  store.set("key", key);
-}
-if (params.has("k") || params.has("q")) {
-  const initialQuery = params.get("q");
-  history.replaceState(null, "", location.pathname);
-  if (initialQuery) $("query").value = initialQuery;
+const initialQuery = params.get("q") || "";
+const initialSetupKey = params.get("k") || "";
+if (params.has("k") || params.has("q")) history.replaceState(null, "", location.pathname);
+if (initialQuery) $("query").value = initialQuery;
+if (initialSetupKey) $("setupKey").value = initialSetupKey;
+
+const toBuffer = (value) => {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+  return Uint8Array.from(atob(padded), (c) => c.charCodeAt(0)).buffer;
+};
+const fromBuffer = (buffer) => {
+  let binary = "";
+  new Uint8Array(buffer).forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+};
+
+function creationOptions(json) {
+  return {
+    ...json,
+    challenge: toBuffer(json.challenge),
+    user: { ...json.user, id: toBuffer(json.user.id) },
+    excludeCredentials: (json.excludeCredentials || []).map((c) => ({ ...c, id: toBuffer(c.id) })),
+  };
 }
 
-function renderKey() {
-  $("keyCard").classList.toggle("hidden", Boolean(key));
+function requestOptions(json) {
+  return {
+    ...json,
+    challenge: toBuffer(json.challenge),
+    allowCredentials: (json.allowCredentials || []).map((c) => ({ ...c, id: toBuffer(c.id) })),
+  };
 }
 
-function fileUrl(id) {
-  return `${API}/api/jobs/${id}/file?k=${encodeURIComponent(key)}`;
+function credentialJson(credential) {
+  const response = credential.response;
+  const result = {
+    id: credential.id,
+    rawId: fromBuffer(credential.rawId),
+    type: credential.type,
+    authenticatorAttachment: credential.authenticatorAttachment || undefined,
+    clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+    response: { clientDataJSON: fromBuffer(response.clientDataJSON) },
+  };
+  if (response.attestationObject) {
+    result.response.attestationObject = fromBuffer(response.attestationObject);
+    if (response.getTransports) result.response.transports = response.getTransports();
+  } else {
+    result.response.authenticatorData = fromBuffer(response.authenticatorData);
+    result.response.signature = fromBuffer(response.signature);
+    if (response.userHandle) result.response.userHandle = fromBuffer(response.userHandle);
+  }
+  return result;
+}
+
+async function call(path, { method = "GET", body, auth = true } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (auth && session) headers.Authorization = `Bearer ${session.token}`;
+  const response = await fetch(API + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    session = null;
+    store.set("session", null);
+    showScreen("login");
+    throw new Error("нужно войти заново");
+  }
+  if (!response.ok) throw new Error(data.error || `ошибка ${response.status}`);
+  return data;
+}
+
+function showScreen(screen) {
+  $("loginCard").classList.toggle("hidden", screen !== "login");
+  $("setupCard").classList.toggle("hidden", screen !== "setup");
+  $("formCard").classList.toggle("hidden", screen !== "app");
+  if (screen !== "app") {
+    $("jobCard").classList.add("hidden");
+    $("historyCard").classList.add("hidden");
+  } else {
+    renderHistory();
+  }
+  if (screen === "login") prefetchLogin();
+}
+
+async function prefetchLogin() {
+  loginOptions = null;
+  try {
+    loginOptions = await call("/api/auth/login/options", { method: "POST", auth: false });
+  } catch (error) {
+    $("loginNote").textContent = String(error.message || error);
+  }
+}
+
+async function prefetchSetup() {
+  const setupKey = $("setupKey").value.trim();
+  setupOptions = null;
+  setupOptionsKey = setupKey;
+  if (!setupKey) return;
+  try {
+    setupOptions = await call("/api/auth/register/options", { method: "POST", auth: false, body: { setup_key: setupKey } });
+    $("setupNote").textContent = "ключ подходит — жми «Привязать Face ID»";
+  } catch (error) {
+    $("setupNote").textContent = String(error.message || error);
+  }
+}
+
+function signedIn(result) {
+  session = result;
+  store.set("session", session);
+  showScreen("app");
+  if ($("query").value.trim()) start();
+}
+
+async function login() {
+  $("loginBtn").disabled = true;
+  try {
+    if (!loginOptions) await prefetchLogin();
+    const credential = await navigator.credentials.get({ publicKey: requestOptions(loginOptions) });
+    signedIn(await call("/api/auth/login", { method: "POST", auth: false, body: { credential: credentialJson(credential) } }));
+  } catch (error) {
+    $("loginNote").textContent = `не вышло: ${error.message || error}`;
+    prefetchLogin();
+  } finally {
+    $("loginBtn").disabled = false;
+  }
+}
+
+async function setup() {
+  const setupKey = $("setupKey").value.trim();
+  if (!setupKey) return;
+  $("setupBtn").disabled = true;
+  try {
+    if (!setupOptions || setupOptionsKey !== setupKey) await prefetchSetup();
+    if (!setupOptions) return;
+    const credential = await navigator.credentials.create({ publicKey: creationOptions(setupOptions) });
+    const label = /iPhone/.test(navigator.userAgent) ? "iPhone" : navigator.platform || "device";
+    signedIn(await call("/api/auth/register", {
+      method: "POST", auth: false, body: { setup_key: setupKey, credential: credentialJson(credential), label },
+    }));
+  } catch (error) {
+    $("setupNote").textContent = `не вышло: ${error.message || error}`;
+    setupOptions = null;
+  } finally {
+    $("setupBtn").disabled = false;
+  }
+}
+
+function fileUrl(id, download) {
+  return `${API}/api/jobs/${id}/file?d=${encodeURIComponent(download)}`;
 }
 
 function renderHistory() {
-  const items = store.get("history", []).filter((item) => Date.now() - item.at < 3600 * 1000);
+  const items = store.get("history", []).filter((item) => item.download && Date.now() - item.at < 3600 * 1000);
   $("historyCard").classList.toggle("hidden", items.length === 0);
   $("history").replaceChildren(...items.map((item) => {
     const li = document.createElement("li");
@@ -187,7 +328,7 @@ function renderHistory() {
     name.className = "name";
     name.textContent = item.filename;
     const link = document.createElement("a");
-    link.href = fileUrl(item.id);
+    link.href = fileUrl(item.id, item.download);
     link.textContent = "скачать";
     li.append(name, link);
     return li;
@@ -196,7 +337,7 @@ function renderHistory() {
 
 function addHistory(job) {
   const items = store.get("history", []).filter((item) => item.id !== job.id);
-  items.unshift({ id: job.id, filename: job.filename, at: Date.now() });
+  items.unshift({ id: job.id, filename: job.filename, download: job.download, at: Date.now() });
   store.set("history", items.slice(0, 20));
   renderHistory();
 }
@@ -230,8 +371,8 @@ function showJob(job) {
   $("jobMessage").textContent = job.message || "";
   $("jobCaption").replaceChildren(linkify(job.caption || ""));
   const button = $("downloadBtn");
-  if (job.state === "done") {
-    button.href = fileUrl(job.id);
+  if (job.state === "done" && job.download) {
+    button.href = fileUrl(job.id, job.download);
     button.textContent = `Скачать «${job.filename}»`;
     button.classList.remove("hidden");
   } else {
@@ -239,31 +380,13 @@ function showJob(job) {
   }
 }
 
-async function api(path, options = {}) {
-  const response = await fetch(API + path, {
-    ...options,
-    headers: { "Content-Type": "application/json", "X-Key": key, ...(options.headers || {}) },
-  });
-  const data = await response.json().catch(() => ({}));
-  if (response.status === 401) {
-    key = ""; store.set("key", ""); renderKey();
-    throw new Error("неверный ключ — введи заново");
-  }
-  if (!response.ok) throw new Error(data.error || `ошибка ${response.status}`);
-  return data;
-}
-
 async function poll(id) {
   clearTimeout(polling);
   try {
-    const job = await api(`/api/jobs/${id}`);
+    const job = await call(`/api/jobs/${id}`);
     showJob(job);
-    if (job.state === "done") {
-      addHistory(job);
-      $("go").disabled = false;
-      return;
-    }
-    if (job.state === "error") {
+    if (job.state === "done") addHistory(job);
+    if (job.state === "done" || job.state === "error") {
       $("go").disabled = false;
       return;
     }
@@ -277,12 +400,11 @@ async function poll(id) {
 
 async function start() {
   const query = $("query").value.trim();
-  if (!query) return;
-  if (!key) { renderKey(); $("keyInput").focus(); return; }
+  if (!query || !session) return;
   $("go").disabled = true;
   showJob({ state: "queued", message: "отправляю…" });
   try {
-    const job = await api("/api/jobs", { method: "POST", body: JSON.stringify({ q: query }) });
+    const job = await call("/api/jobs", { method: "POST", body: { q: query } });
     showJob(job);
     poll(job.id);
   } catch (error) {
@@ -303,19 +425,34 @@ $("paste").addEventListener("click", async () => {
     $("query").focus();
   }
 });
-$("keySave").addEventListener("click", () => {
-  key = $("keyInput").value.trim();
-  store.set("key", key);
-  renderKey();
-  if ($("query").value.trim()) start();
+$("loginBtn").addEventListener("click", login);
+$("setupBtn").addEventListener("click", setup);
+let setupTimer = null;
+$("setupKey").addEventListener("input", () => {
+  clearTimeout(setupTimer);
+  setupTimer = setTimeout(prefetchSetup, 400);
 });
-$("keyReset").addEventListener("click", () => {
-  key = ""; store.set("key", ""); renderKey(); $("keyInput").focus();
+$("logoutBtn").addEventListener("click", () => {
+  session = null;
+  store.set("session", null);
+  showScreen("login");
 });
 
-renderKey();
-renderHistory();
-if (key && $("query").value.trim()) start();
+(async () => {
+  if (!window.PublicKeyCredential) {
+    $("loginNote").textContent = "этот браузер не умеет Face ID / passkey";
+  }
+  try {
+    const status = await call("/api/auth/status");
+    if (status.session) showScreen("app");
+    else if (status.configured) showScreen("login");
+    else { showScreen("setup"); if (initialSetupKey) prefetchSetup(); }
+    if (status.session && $("query").value.trim()) start();
+  } catch (error) {
+    showScreen("login");
+    $("loginNote").textContent = `сервер недоступен: ${error.message || error}`;
+  }
+})();
 </script>
 </body>
 </html>
