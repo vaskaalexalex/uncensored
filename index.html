@@ -227,7 +227,14 @@ function credentialJson(credential) {
 async function call(path, { method = "GET", body, auth = true } = {}) {
   const headers = { "Content-Type": "application/json" };
   if (auth && session) headers.Authorization = `Bearer ${session.token}`;
-  const response = await fetch(API + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  let response;
+  try {
+    response = await fetch(API + path, {
+      method, headers, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(20000),
+    });
+  } catch (error) {
+    throw new Error(`сервер не отвечает (${error.name === "TimeoutError" ? "таймаут" : error.message}) — возможно, его IP режет провайдер`);
+  }
   const data = await response.json().catch(() => ({}));
   if (response.status === 401) {
     session = null;
@@ -266,6 +273,7 @@ async function prefetchSetup() {
   setupOptions = null;
   setupOptionsKey = setupKey;
   if (!setupKey) return;
+  $("setupNote").textContent = "проверяю ключ…";
   try {
     setupOptions = await call("/api/auth/register/options", { method: "POST", auth: false, body: { setup_key: setupKey } });
     $("setupNote").textContent = "ключ подходит — жми «Привязать Face ID»";
@@ -302,7 +310,10 @@ async function setup() {
   try {
     if (!setupOptions || setupOptionsKey !== setupKey) await prefetchSetup();
     if (!setupOptions) return;
+    if (!window.PublicKeyCredential) throw new Error("этот браузер не поддерживает passkey — открой в Safari");
+    $("setupNote").textContent = "жду Face ID…";
     const credential = await navigator.credentials.create({ publicKey: creationOptions(setupOptions) });
+    $("setupNote").textContent = "сохраняю…";
     const label = /iPhone/.test(navigator.userAgent) ? "iPhone" : navigator.platform || "device";
     signedIn(await call("/api/auth/register", {
       method: "POST", auth: false, body: { setup_key: setupKey, credential: credentialJson(credential), label },
