@@ -142,7 +142,7 @@ details li { margin-bottom: 6px; }
         <li>Настройки iPhone → Приложения → Safari → Загрузки.</li>
         <li>«Другое…» → «На iPhone» → папка <b>foobar2000</b> → «Готово».</li>
         <li>Открывай эту страницу именно в Safari (не с ярлыка на экране «Домой»).</li>
-        <li>Жмёшь «Скачать» → файл ложится в папку foobar, трек сразу в библиотеке. Если не появился — в foobar: Settings → Media Library → Rescan.</li>
+        <li>Когда трек готов, загрузка стартует сама и файл ложится в папку foobar. Если Safari спросит «Загрузить?» — жми «Загрузить». Если трек не появился в библиотеке — в foobar: Settings → Media Library → Rescan.</li>
       </ol>
     </details>
     <details style="margin-top:12px">
@@ -380,12 +380,27 @@ function showJob(job) {
   }
 }
 
+function autoDownload(job) {
+  const done = store.get("downloaded", []);
+  if (done.includes(job.id)) return;
+  store.set("downloaded", [job.id, ...done].slice(0, 50));
+  const link = document.createElement("a");
+  link.href = fileUrl(job.id, job.download);
+  link.download = job.filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
 async function poll(id) {
   clearTimeout(polling);
   try {
     const job = await call(`/api/jobs/${id}`);
     showJob(job);
-    if (job.state === "done") addHistory(job);
+    if (job.state === "done") {
+      addHistory(job);
+      autoDownload(job);
+    }
     if (job.state === "done" || job.state === "error") {
       $("go").disabled = false;
       return;
